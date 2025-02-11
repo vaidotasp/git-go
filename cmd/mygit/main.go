@@ -166,6 +166,9 @@ func main() {
 		}
 
 		fmt.Print(hash)
+
+	case "ls-tree":
+		fmt.Println("ls-tree")
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", command)
 		os.Exit(1)
