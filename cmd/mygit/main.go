@@ -4,13 +4,113 @@ import (
 	"bytes"
 	"compress/zlib"
 	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
+
+type Entry struct {
+	entry_type int
+	name       string
+	sha        string
+}
+
+func readFilesFromSHA1(sha1 string) []Entry {
+	// files are zlib compressed
+	// dir name is the first two chars
+	dir_name := sha1[:2]
+	// rest of the chars is the filename
+	file_name := sha1[2:]
+
+	// objects always live in the same .git/objects directory
+	file_path, err := filepath.Abs(".git/objects/" + dir_name + "/" + file_name)
+	if err != nil {
+		fmt.Println("Error reading: ", err.Error())
+	}
+
+	// open file
+	file, err := os.Open(file_path)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// zlib decoding
+	r, err := zlib.NewReader(file)
+	if err != nil {
+		fmt.Println("Cannot read the file: ", file_path)
+	}
+	defer r.Close()
+
+	var file_output bytes.Buffer
+	_, err = io.Copy(&file_output, r)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// iterate over bytes and find null byte, after null byte we have the output of the file that we care about
+	var null_byte_idx int
+	for k, v := range file_output.Bytes() {
+		if v == 0 {
+			null_byte_idx = k
+			break
+		}
+	}
+
+	// header := string(file_output.Bytes()[:null_byte_idx]) // tree 99 (type of object and followed by byte size)
+
+	// for the rest of the bytes, we go over each byte, when we find null byte, we split that left side as it contains filetype and filename, then we take the right 20byte SHA and add it to the same entry, increment index by 20 and keep going
+	rest_of_object_raw := file_output.Bytes()[null_byte_idx+1:]
+
+	var entries []Entry
+
+	for i := 0; i < len(rest_of_object_raw); {
+		v := rest_of_object_raw[i]
+		if v == 0 {
+			first_part := rest_of_object_raw[:i]
+			// check that we have at least 20 bytes to the right
+			if i+1+20 > len(rest_of_object_raw) {
+				fmt.Println("SHA corruption, not enough bytes left")
+				break
+			}
+
+			sha_part := rest_of_object_raw[i+1 : i+1+20]
+
+			type_and_name := strings.Split(string(first_part), " ")
+			entry_type, err := strconv.Atoi(type_and_name[0])
+			if err != nil {
+				fmt.Println("Error:", err)
+			}
+
+			shaHex := hex.EncodeToString(sha_part)
+
+			entry := Entry{
+				entry_type: entry_type,
+				name:       type_and_name[1],
+				sha:        shaHex,
+			}
+
+			entries = append(entries, entry)
+
+			// incrementing by 20 because SHA is 20 length
+			i += 1 + 20
+
+			// slicing the main byte array here
+			rest_of_object_raw = rest_of_object_raw[i:]
+
+			// reset i to zero because we sliced the main arr above
+			i = 0
+		} else {
+			i++
+		}
+	}
+
+	return entries
+}
 
 func generateSHA1(uncompressed_content []byte) string {
 	header := []byte("blob ")
@@ -168,7 +268,48 @@ func main() {
 		fmt.Print(hash)
 
 	case "ls-tree":
-		fmt.Println("ls-tree")
+		args := os.Args
+		if len(args) == 2 {
+			fmt.Print("2 args too few")
+			os.Exit(1)
+		}
+
+		if len(args) == 3 {
+			// check that we have 40 length hash
+			fmt.Printf(args[2])
+			os.Exit(1)
+		}
+
+		if len(args) == 4 && args[2] == "--name-only" {
+			// check that we have --name-only flag and it is followed by 40 length hash
+			sha := args[3]
+			s := readFilesFromSHA1(sha)
+
+			var output string
+
+			for _, v := range s {
+				file_name := v.name
+				output = output + file_name + "\n"
+			}
+
+			fmt.Print(output)
+		} else {
+			sha := args[3]
+			s := readFilesFromSHA1(sha)
+			var output string
+
+			for _, v := range s {
+				// todo:, how to get tree/blob etc?
+				output = output + fmt.Sprintf("%d", v.entry_type) + " " + v.name + " " + v.sha + "\n"
+			}
+
+			fmt.Print(output)
+			// 040000 tree <tree_sha_1>    dir1
+			// 040000 tree <tree_sha_2>    dir2
+			// 100644 blob <blob_sha_1>    file1
+		}
+		// tester will check this --name-only, but we can also implement flagless version too
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", command)
 		os.Exit(1)
